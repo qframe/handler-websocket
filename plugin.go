@@ -10,8 +10,6 @@ import (
 	"golang.org/x/net/websocket"
 	"github.com/zpatrick/go-config"
 	"github.com/qnib/qframe-types"
-
-	"github.com/golang-samples/websocket/websocket-chat/src/chat"
 )
 
 const (
@@ -51,7 +49,7 @@ func (p *Plugin) Serve() {
 }
 
 func (p *Plugin) Listen() {
-	server := chat.NewServer("/entry")
+	server := NewServer("/entry")
 	server.Listen()
 }
 
