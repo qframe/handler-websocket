@@ -1,39 +1,37 @@
 package qhandler_websocket
 
 import (
-	"io"
 	"fmt"
 	"net/http"
 	"reflect"
-	"time"
 
 	"golang.org/x/net/websocket"
 	"github.com/zpatrick/go-config"
 	"github.com/qnib/qframe-types"
 )
 
+
 const (
 	version = "0.0.1"
 	pluginTyp = qtypes.HANDLER
-	pluginPkg = "influxdb"
+	pluginPkg = "websocket"
 )
 
 type Plugin struct {
     qtypes.Plugin
-	ws *websocket.Conn
+	doneCh    chan bool
+	errCh     chan error
+
 }
 
 func New(qChan qtypes.QChan, cfg *config.Config, name string) (Plugin, error) {
 	var err error
 	p := Plugin{
 		Plugin: qtypes.NewNamedPlugin(qChan, cfg, pluginTyp, pluginPkg, name, version),
+		doneCh: make(chan bool),
+		errCh: make(chan error),
 	}
 	return p, err
-}
-
-func echoHandler(ws *websocket.Conn) {
-	fmt.Println("huhu")
-	io.Copy(ws, ws)
 }
 
 // Connect creates a connection to InfluxDB
@@ -48,28 +46,29 @@ func (p *Plugin) Serve() {
 	}
 }
 
-func (p *Plugin) Listen() {
-	server := NewServer("/entry")
-	server.Listen()
-}
 
-func (p *Plugin) SendToWS() {
-	tc := p.QChan.Tick.Join()
-	// Initialise lastTick with time of a year ago
-	lastTick := time.Now().AddDate(0,0,-1)
+func (p *Plugin) Listen() {
+	p.Log("info", "Listening server...")
+
+	// websocket handler
+	onConnected := func(ws *websocket.Conn) {
+		defer func() {
+			err := ws.Close()
+			if err != nil {
+				p.errCh <- err
+			}
+		}()
+		client := NewClient(ws, p)
+		client.Listen()
+	}
+	http.Handle("/ticker", websocket.Handler(onConnected))
+	p.Log("info", "Created handler")
 	for {
 		select {
-		case val := <-tc.Read:
-			switch val.(type) {
-			case qtypes.Ticker:
-				tick := val.(qtypes.Ticker)
-				tickDiff, _ := tick.SkipTick(lastTick)
-				msg := fmt.Sprintf("tick '%s' | Last tick %s ago (< %s)", tick.Name, tickDiff.String(), tick.Duration.String())
-				p.Log("info", "Send via WS: "+msg)
-				websocket.Message.Send(p.ws, msg)
-				now := time.Now()
-				lastTick = now
-			}
+		case err := <-p.errCh:
+			p.Log("error", fmt.Sprintf("Error: %s", err.Error()))
+		case <-p.doneCh:
+			return
 		}
 	}
 }
@@ -77,14 +76,12 @@ func (p *Plugin) SendToWS() {
 // Run fetches everything from the Data channel and flushes it to stdout
 func (p *Plugin) Run() {
 	p.Log("notice", fmt.Sprintf("Start handler %sv%s", p.Name, version))
-	tick := p.CfgIntOr("ticker-msec", 1000)
+	tick := p.CfgIntOr("ticker-msec", 2500)
 	bg := p.QChan.Data.Join()
 	tc := p.QChan.Tick.Join()
 	p.StartTicker("websocket", tick)
 	go p.Serve()
-	go p.Listen()
-	// Initialise lastTick with time of a year ago
-	//lastTick := time.Now().AddDate(0,0,-1)
+	p.Listen()
 	for {
 		select {
 		case val := <-bg.Read:
@@ -96,26 +93,7 @@ func (p *Plugin) Run() {
 				}
 			}
 		case val := <-tc.Read:
-			switch val.(type) {
-			case qtypes.Ticker:
-				continue
-				/*
-				tick := val.(qtypes.Ticker)
-				tickDiff, skipTick := tick.SkipTick(lastTick)
-				if ! skipTick {
-					msg := fmt.Sprintf("tick '%s' | Last tick %s ago (< %s)", tick.Name, tickDiff.String(), tick.Duration.String())
-					p.Log("info", "Send via WS: "+msg)
-					err := websocket.Message.Send(p.ws, msg)
-					if err != nil {
-						p.Log("error", err.Error())
-					}
-				}
-				now := time.Now()
-				lastTick = now
-				*/
-			default:
-				p.Log("warn", fmt.Sprintf("Received Tick of type %s", reflect.TypeOf(val)))
-			}
+			p.Log("warn", fmt.Sprintf("Received Tick of type %s", reflect.TypeOf(val)))
 		}
 	}
 }

@@ -1,16 +1,14 @@
 package qhandler_websocket
 
 import (
-	"fmt"
-	"io"
+	"time"
 	"log"
 
 	"golang.org/x/net/websocket"
+	"github.com/qnib/qframe-types"
 )
 
 // Inspired by https://github.com/golang-samples/websocket
-
-const channelBufSize = 100
 
 var maxId int = 0
 
@@ -18,41 +16,25 @@ var maxId int = 0
 type Client struct {
 	id     int
 	ws     *websocket.Conn
-	server *Server
-	ch     chan *Message
+	plugin *Plugin
 	doneCh chan bool
 }
 
 // Create new chat client.
-func NewClient(ws *websocket.Conn, server *Server) *Client {
+func NewClient(ws *websocket.Conn, p *Plugin) *Client {
 
 	if ws == nil {
 		panic("ws cannot be nil")
 	}
 
-	if server == nil {
-		panic("server cannot be nil")
-	}
-
 	maxId++
-	ch := make(chan *Message, channelBufSize)
 	doneCh := make(chan bool)
 
-	return &Client{maxId, ws, server, ch, doneCh}
+	return &Client{maxId, ws, p,doneCh}
 }
 
 func (c *Client) Conn() *websocket.Conn {
 	return c.ws
-}
-
-func (c *Client) Write(msg *Message) {
-	select {
-	case c.ch <- msg:
-	default:
-		c.server.Del(c)
-		err := fmt.Errorf("client %d is disconnected.", c.id)
-		c.server.Err(err)
-	}
 }
 
 func (c *Client) Done() {
@@ -61,53 +43,34 @@ func (c *Client) Done() {
 
 // Listen Write and Read request via chanel
 func (c *Client) Listen() {
-	go c.listenWrite()
-	c.listenRead()
+	c.listenWrite()
 }
 
 // Listen write request via chanel
 func (c *Client) listenWrite() {
-	log.Println("Listening write to client")
+	c.plugin.Log("info", "Listening write to client")
+	//bg := c.plugin.QChan.Data.Join()
+	tc := c.plugin.QChan.Tick.Join()
+	//lastTick := time.Now().AddDate(0,0,-1)
+	lastTick := time.Now()
 	for {
 		select {
-
 		// send message to the client
-		case msg := <-c.ch:
-			log.Println("Send:", msg)
-			websocket.JSON.Send(c.ws, msg)
-
+		case val := <-tc.Read:
+			switch val.(type) {
+			case qtypes.Ticker:
+				tick := val.(qtypes.Ticker)
+				tickDiff, _ := tick.SkipTick(lastTick)
+				t := Tick{tick.Name, tickDiff.String(), tick.Duration.String()}
+				log.Printf("Send via WS: %v", t)
+				websocket.JSON.Send(c.ws, t)
+				now := time.Now()
+				lastTick = now
+			}
 		// receive done request
 		case <-c.doneCh:
-			c.server.Del(c)
 			c.doneCh <- true // for listenRead method
 			return
-		}
-	}
-}
-
-// Listen read request via chanel
-func (c *Client) listenRead() {
-	log.Println("Listening read from client")
-	for {
-		select {
-
-		// receive done request
-		case <-c.doneCh:
-			c.server.Del(c)
-			c.doneCh <- true // for listenWrite method
-			return
-
-		// read data from websocket connection
-		default:
-			var msg Message
-			err := websocket.JSON.Receive(c.ws, &msg)
-			if err == io.EOF {
-				c.doneCh <- true
-			} else if err != nil {
-				c.server.Err(err)
-			} else {
-				c.server.SendAll(&msg)
-			}
 		}
 	}
 }
